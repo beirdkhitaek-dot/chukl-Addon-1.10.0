@@ -2,6 +2,7 @@ package com.chukl.addon.modules;
 
 import com.chukl.addon.ChuklAddon;
 import meteordevelopment.meteorclient.events.render.Render3DEvent;
+import meteordevelopment.meteorclient.events.world.ChunkDataEvent;
 import meteordevelopment.meteorclient.events.world.TickEvent;
 import meteordevelopment.meteorclient.renderer.ShapeMode;
 import meteordevelopment.meteorclient.settings.BoolSetting;
@@ -27,7 +28,6 @@ import net.minecraft.world.chunk.ChunkSection;
 import net.minecraft.world.chunk.WorldChunk;
 
 import java.util.ArrayList;
-import java.util.HashMap;
 import java.util.HashSet;
 import java.util.List;
 import java.util.Map;
@@ -35,31 +35,30 @@ import java.util.Set;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
-import java.util.concurrent.atomic.AtomicBoolean;
+import java.util.function.Consumer;
 import java.util.function.Predicate;
 
 /**
- * Finds probable base locations from plant/amethyst growth states and buried rotated deepslate.
+ * Finds probable base locations from plant/amethyst growth and buried rotated deepslate.
  *
- * Plants only finish growing while their chunk is loaded and ticking, so chunks full of fully grown
- * plants that no one is currently near often mean a player spent a long time there.
+ * Works the same way as the Krypton module: every chunk is scanned ONCE when its data arrives (and once
+ * for the chunks already loaded when you turn the module on). Chunks that still contain things that
+ * have not finished growing "heat up" all chunks around them. A chunk that is hot, is not covered by
+ * fully grown plants, and has at least 3 loaded neighbors is marked as sus.
  *
- * Performance: chunks are scanned on a low priority background thread, a few per second, nearest
- * first, using palette checks to skip sections that contain nothing interesting.
+ * Speed: chunks are scanned in parallel on several background threads, sections without anything
+ * interesting are skipped, and the sus list refreshes every other tick.
  */
 public class SusChunkFinder extends Module {
-    private record ChunkResult(int notGrown, boolean hasGrown, List<BlockPos> deepslate) {}
+    private record ScanResult(int notGrown, boolean hasGrown, Set<BlockPos> deepslate) {}
 
-    private record Params(int simDist, int sensitivity, int radius, int perScan, long rescanMs,
-                          boolean kelp, boolean caveVines, boolean vines, boolean amethyst, boolean folia,
-                          boolean bamboo, boolean cocoa, boolean beeNest, boolean deepslate, boolean smart) {}
+    private record Opts(boolean kelp, boolean caveVines, boolean vines, boolean amethyst, boolean folia,
+                        boolean bamboo, boolean cocoa, boolean beeNest, boolean deepslate) {}
 
     private final SettingGroup sgGeneral = settings.getDefaultGroup();
-    private final SettingGroup sgIndicators = sgGeneral; // same list as the original: distance, sensitivity, smart adjustment, alpha, then indicators
-    private final SettingGroup sgPerf = settings.createGroup("Performance");
     private final SettingGroup sgRender = settings.createGroup("Render");
 
-    // --- General ---
+    // --- General (same list and order as Krypton) ---
 
     private final Setting<Integer> simulationDistance = sgGeneral.add(new IntSetting.Builder()
         .name("simulation-distance")
@@ -72,7 +71,7 @@ public class SusChunkFinder extends Module {
 
     private final Setting<Integer> sensitivity = sgGeneral.add(new IntSetting.Builder()
         .name("sensitivity")
-        .description("Minimum number of fully grown things needed to mark a chunk as sus.")
+        .description("Minimum number of unfinished growing things needed to mark a chunk as sus.")
         .defaultValue(5)
         .range(1, 20)
         .sliderRange(1, 20)
@@ -81,7 +80,7 @@ public class SusChunkFinder extends Module {
 
     private final Setting<Boolean> smartAdjustment = sgGeneral.add(new BoolSetting.Builder()
         .name("smart-adjustment")
-        .description("Never uses a simulation distance larger than the area actually loaded around you. Approximation of the original option.")
+        .description("Kept so the list matches Krypton. Currently does nothing: your sensitivity and simulation distance are always used exactly as set.")
         .defaultValue(true)
         .build()
     );
@@ -95,66 +94,51 @@ public class SusChunkFinder extends Module {
         .build()
     );
 
-    // --- Indicators ---
-
-    private final Setting<Boolean> kelp = sgIndicators.add(new BoolSetting.Builder()
+    private final Setting<Boolean> kelp = sgGeneral.add(new BoolSetting.Builder()
         .name("kelp").description("Use kelp growth.").defaultValue(false).build());
 
-    private final Setting<Boolean> caveVines = sgIndicators.add(new BoolSetting.Builder()
+    private final Setting<Boolean> caveVines = sgGeneral.add(new BoolSetting.Builder()
         .name("cave-vines").description("Use cave vine growth.").defaultValue(false).build());
 
-    private final Setting<Boolean> vines = sgIndicators.add(new BoolSetting.Builder()
+    private final Setting<Boolean> vines = sgGeneral.add(new BoolSetting.Builder()
         .name("vines").description("Use vine growth.").defaultValue(false).build());
 
-    private final Setting<Boolean> amethyst = sgIndicators.add(new BoolSetting.Builder()
+    private final Setting<Boolean> amethyst = sgGeneral.add(new BoolSetting.Builder()
         .name("amethyst").description("Use amethyst bud and cluster growth.").defaultValue(true).build());
 
-    private final Setting<Boolean> bamboo = sgIndicators.add(new BoolSetting.Builder()
+    private final Setting<Boolean> bamboo = sgGeneral.add(new BoolSetting.Builder()
         .name("bamboo").description("Use bamboo growth.").defaultValue(false).build());
 
-    private final Setting<Boolean> cocoa = sgIndicators.add(new BoolSetting.Builder()
+    private final Setting<Boolean> cocoa = sgGeneral.add(new BoolSetting.Builder()
         .name("cocoa").description("Use cocoa pod growth.").defaultValue(false).build());
 
-    private final Setting<Boolean> beeNest = sgIndicators.add(new BoolSetting.Builder()
+    private final Setting<Boolean> beeNest = sgGeneral.add(new BoolSetting.Builder()
         .name("bee-nest")
         .description("Bee nests with honey mean someone loaded the chunk.")
         .defaultValue(false)
         .build()
     );
 
-    private final Setting<Boolean> rotatedDeepslate = sgIndicators.add(new BoolSetting.Builder()
+    private final Setting<Boolean> rotatedDeepslate = sgGeneral.add(new BoolSetting.Builder()
         .name("rotated-deepslate")
         .description("Detect rotated deepslate buried between Y 0 and 60.")
         .defaultValue(false)
         .build()
     );
 
-    // --- Performance ---
-
-    private final Setting<Integer> scanRadius = sgPerf.add(new IntSetting.Builder()
-        .name("scan-radius")
-        .description("Only scan chunks within this many chunks of you.")
-        .defaultValue(10)
-        .range(2, 32)
-        .sliderRange(2, 24)
+    private final Setting<Integer> scanThreads = sgGeneral.add(new IntSetting.Builder()
+        .name("scan-threads")
+        .description("How many threads scan chunks at the same time. More = faster scanning. Applies the next time you turn the module on.")
+        .defaultValue(Math.max(1, Math.min(8, Runtime.getRuntime().availableProcessors())))
+        .range(1, 16)
+        .sliderRange(1, 16)
         .build()
     );
 
-    private final Setting<Integer> chunksPerScan = sgPerf.add(new IntSetting.Builder()
-        .name("chunks-per-scan")
-        .description("Chunks scanned per second (nearest first). Lower = lighter on weak devices.")
-        .defaultValue(4)
-        .range(1, 30)
-        .sliderRange(1, 20)
-        .build()
-    );
-
-    private final Setting<Integer> rescanSeconds = sgPerf.add(new IntSetting.Builder()
-        .name("rescan-seconds")
-        .description("Seconds before an already scanned chunk is scanned again.")
-        .defaultValue(120)
-        .range(10, 900)
-        .sliderRange(10, 600)
+    private final Setting<Boolean> debugInfo = sgGeneral.add(new BoolSetting.Builder()
+        .name("debug-info")
+        .description("Every 2 seconds, prints the numbers behind the chunk you are standing in (heat, tracked, loaded neighbors). Use it to compare with Krypton.")
+        .defaultValue(false)
         .build()
     );
 
@@ -219,12 +203,21 @@ public class SusChunkFinder extends Module {
         .build()
     );
 
-    private final Map<ChunkPos, ChunkResult> results = new ConcurrentHashMap<>();
-    private final Map<ChunkPos, Long> lastScan = new ConcurrentHashMap<>();
-    private final AtomicBoolean scanning = new AtomicBoolean(false);
+    // --- Data (only touched by the single scan thread, read by the main thread) ---
+
+    private final Map<ChunkPos, Integer> heatmap = new ConcurrentHashMap<>();
+    private final Map<ChunkPos, Integer> tracked = new ConcurrentHashMap<>();
+    private final Map<ChunkPos, Integer> growthCounts = new ConcurrentHashMap<>();
+    private final Map<ChunkPos, Boolean> fullyGrown = new ConcurrentHashMap<>();
+    private final Map<ChunkPos, Integer> usedSimDist = new ConcurrentHashMap<>();
+    private final Map<ChunkPos, Set<BlockPos>> chunkDeepslate = new ConcurrentHashMap<>();
+    private final Set<ChunkPos> loadedChunks = ConcurrentHashMap.newKeySet();
+    private final Set<BlockPos> deepslateSet = ConcurrentHashMap.newKeySet();
+
     private volatile Set<ChunkPos> susChunks = Set.of();
     private volatile List<BlockPos> deepslateBlocks = List.of();
-    private ExecutorService executor;
+    private ExecutorService[] executors;
+    private ClientWorld lastWorld;
     private int timer;
 
     public SusChunkFinder() {
@@ -233,59 +226,59 @@ public class SusChunkFinder extends Module {
 
     @Override
     public void onActivate() {
-        executor = Executors.newSingleThreadExecutor(r -> {
-            Thread t = new Thread(r, "SusChunkFinder-Scan");
-            t.setDaemon(true);
-            t.setPriority(Thread.MIN_PRIORITY);
-            return t;
-        });
-        clearData();
-        timer = 0;
+        restart();
     }
 
     @Override
     public void onDeactivate() {
-        if (executor != null) executor.shutdownNow();
-        executor = null;
+        stopExecutors();
+        lastWorld = null;
         clearData();
     }
 
+    private void stopExecutors() {
+        if (executors != null) {
+            for (ExecutorService e : executors) e.shutdownNow();
+        }
+        executors = null;
+    }
+
+    private void restart() {
+        stopExecutors();
+
+        // One single-thread executor per worker. A given chunk always goes to the same worker, so two
+        // scans of the same chunk can never run at once, while different chunks scan in parallel.
+        int count = scanThreads.get();
+        executors = new ExecutorService[count];
+        for (int i = 0; i < count; i++) {
+            int id = i;
+            executors[i] = Executors.newSingleThreadExecutor(r -> {
+                Thread t = new Thread(r, "SusChunkFinder-Scan-" + id);
+                t.setDaemon(true);
+                return t;
+            });
+        }
+
+        clearData();
+        lastWorld = mc.world;
+        timer = 0;
+        scanLoadedChunks();
+    }
+
     private void clearData() {
-        results.clear();
-        lastScan.clear();
+        heatmap.clear();
+        tracked.clear();
+        growthCounts.clear();
+        fullyGrown.clear();
+        usedSimDist.clear();
+        chunkDeepslate.clear();
+        loadedChunks.clear();
+        deepslateSet.clear();
         susChunks = Set.of();
         deepslateBlocks = List.of();
-        scanning.set(false);
     }
 
-    @EventHandler
-    private void onTick(TickEvent.Post event) {
-        if (mc.world == null || mc.player == null || executor == null) return;
-        if (--timer > 0) return;
-        timer = 20; // once per second
-
-        if (!scanning.compareAndSet(false, true)) return;
-
-        ClientWorld world = mc.world;
-        ChunkPos center = mc.player.getChunkPos();
-
-        Params params = new Params(
-            simulationDistance.get(), sensitivity.get(), scanRadius.get(), chunksPerScan.get(),
-            rescanSeconds.get() * 1000L,
-            kelp.get(), caveVines.get(), vines.get(), amethyst.get(), amethyst.get() && isDonutFolia(),
-            bamboo.get(), cocoa.get(), beeNest.get(), rotatedDeepslate.get(), smartAdjustment.get()
-        );
-
-        executor.execute(() -> {
-            try {
-                runScan(world, center, params);
-            } catch (Throwable t) {
-                ChuklAddon.LOG.error("Sus Chunk Finder scan failed", t);
-            } finally {
-                scanning.set(false);
-            }
-        });
-    }
+    // ---------- scanning ----------
 
     private boolean isDonutFolia() {
         if (mc.getNetworkHandler() == null) return false;
@@ -293,92 +286,109 @@ public class SusChunkFinder extends Module {
         return brand != null && brand.contains("DonutFolia");
     }
 
-    /** Background thread: scan a few new chunks, drop unloaded ones, rebuild the result sets. */
-    private void runScan(ClientWorld world, ChunkPos center, Params p) {
-        long now = System.currentTimeMillis();
-
-        // 1) Chunks that need (re)scanning, nearest first
-        List<ChunkPos> candidates = new ArrayList<>();
-        int maxLoaded = 0;
-        for (int cx = center.x - p.radius(); cx <= center.x + p.radius(); cx++) {
-            for (int cz = center.z - p.radius(); cz <= center.z + p.radius(); cz++) {
-                if (!world.getChunkManager().isChunkLoaded(cx, cz)) continue;
-
-                maxLoaded = Math.max(maxLoaded, Math.max(Math.abs(cx - center.x), Math.abs(cz - center.z)));
-
-                ChunkPos cp = new ChunkPos(cx, cz);
-                Long last = lastScan.get(cp);
-                if (last == null || now - last > p.rescanMs()) candidates.add(cp);
-            }
-        }
-        candidates.sort((a, b) -> Integer.compare(distSq(a, center), distSq(b, center)));
-
-        int budget = p.perScan();
-        for (ChunkPos cp : candidates) {
-            if (budget-- <= 0) break;
-
-            WorldChunk chunk = world.getChunkManager().getWorldChunk(cp.x, cp.z);
-            if (chunk == null) continue;
-
-            results.put(cp, scanChunk(world, chunk, cp, p));
-            lastScan.put(cp, now);
-        }
-
-        // 2) Forget chunks that are no longer loaded
-        results.keySet().removeIf(cp -> !world.getChunkManager().isChunkLoaded(cp.x, cp.z));
-        lastScan.keySet().removeIf(cp -> !results.containsKey(cp));
-
-        // 3) Rebuild what gets drawn
-        int simDist = p.smart() ? Math.max(2, Math.min(p.simDist(), maxLoaded)) : p.simDist();
-        rebuild(simDist, p.sensitivity());
+    private Opts opts() {
+        return new Opts(kelp.get(), caveVines.get(), vines.get(), amethyst.get(), amethyst.get() && isDonutFolia(),
+            bamboo.get(), cocoa.get(), beeNest.get(), rotatedDeepslate.get());
     }
 
-    private static int distSq(ChunkPos a, ChunkPos b) {
-        int dx = a.x - b.x, dz = a.z - b.z;
-        return dx * dx + dz * dz;
+    private int effectiveSimDist() {
+        return simulationDistance.get();
     }
 
-    private void rebuild(int simDist, int sensitivity) {
-        Map<ChunkPos, Integer> heat = new HashMap<>();
-        Set<ChunkPos> tracked = new HashSet<>();
-        List<BlockPos> deepslate = new ArrayList<>();
+    /** Your sensitivity is used exactly as set. Smart Adjustment does not change it. */
+    private int effectiveSensitivity() {
+        return sensitivity.get();
+    }
 
-        for (Map.Entry<ChunkPos, ChunkResult> entry : results.entrySet()) {
-            ChunkPos cp = entry.getKey();
-            ChunkResult r = entry.getValue();
+    /** Scans the chunks that are already loaded (when the module is turned on or the world changes). */
+    private void scanLoadedChunks() {
+        if (mc.world == null || mc.player == null) return;
 
-            if (r.notGrown() > 0 || r.hasGrown()) {
-                for (int dx = -simDist; dx <= simDist; dx++) {
-                    for (int dz = -simDist; dz <= simDist; dz++) {
-                        ChunkPos n = new ChunkPos(cp.x + dx, cp.z + dz);
-                        if (r.notGrown() > 0) heat.merge(n, r.notGrown(), Integer::sum);
-                        if (r.hasGrown()) tracked.add(n);
-                    }
-                }
+        ChunkPos center = mc.player.getChunkPos();
+        int radius = mc.options.getViewDistance().getValue() + 2;
+
+        for (int cx = center.x - radius; cx <= center.x + radius; cx++) {
+            for (int cz = center.z - radius; cz <= center.z + radius; cz++) {
+                if (!mc.world.getChunkManager().isChunkLoaded(cx, cz)) continue;
+                queue(mc.world.getChunkManager().getWorldChunk(cx, cz));
             }
+        }
+    }
 
-            deepslate.addAll(r.deepslate());
+    @EventHandler
+    private void onChunkData(ChunkDataEvent event) {
+        queue(event.chunk);
+    }
+
+    private void queue(WorldChunk chunk) {
+        ExecutorService[] pool = executors;
+        if (pool == null || chunk == null || mc.world == null) return;
+
+        ClientWorld world = mc.world;
+        Opts o = opts();
+        int simDist = effectiveSimDist();
+
+        ChunkPos pos = chunk.getPos();
+        ExecutorService worker = pool[Math.floorMod(pos.x * 31 + pos.z, pool.length)];
+
+        worker.execute(() -> {
+            try {
+                updateChunk(world, chunk, o, simDist);
+            } catch (Throwable t) {
+                ChuklAddon.LOG.error("Sus Chunk Finder scan failed", t);
+            }
+        });
+    }
+
+    private static void forEachNeighbor(ChunkPos cp, int dist, Consumer<ChunkPos> action) {
+        for (int dx = -dist; dx <= dist; dx++) {
+            for (int dz = -dist; dz <= dist; dz++) {
+                action.accept(new ChunkPos(cp.x + dx, cp.z + dz));
+            }
+        }
+    }
+
+    /** Background thread. Removes what this chunk contributed last time, scans it again, adds the new result. */
+    private void updateChunk(ClientWorld world, WorldChunk chunk, Opts o, int simDist) {
+        if (world != mc.world) return;
+
+        ChunkPos cp = chunk.getPos();
+        loadedChunks.add(cp);
+
+        int prevSim = usedSimDist.getOrDefault(cp, simDist);
+        int prevGrowth = growthCounts.getOrDefault(cp, 0);
+        boolean prevFull = Boolean.TRUE.equals(fullyGrown.get(cp));
+        Set<BlockPos> prevDeepslate = chunkDeepslate.remove(cp);
+
+        if (prevGrowth > 0) {
+            forEachNeighbor(cp, prevSim, n -> heatmap.compute(n, (k, v) -> {
+                int value = (v == null ? 0 : v) - prevGrowth;
+                return value <= 0 ? null : value;
+            }));
         }
 
-        Set<ChunkPos> sus = new HashSet<>();
-        for (Map.Entry<ChunkPos, Integer> entry : heat.entrySet()) {
-            ChunkPos cp = entry.getKey();
-            if (entry.getValue() < sensitivity) continue;
-            if (tracked.contains(cp) || !results.containsKey(cp)) continue;
-
-            int neighbors = 0;
-            for (int dx = -1; dx <= 1; dx++) {
-                for (int dz = -1; dz <= 1; dz++) {
-                    if (dx == 0 && dz == 0) continue;
-                    if (results.containsKey(new ChunkPos(cp.x + dx, cp.z + dz))) neighbors++;
-                }
-            }
-
-            if (neighbors >= 3) sus.add(cp);
+        if (prevFull) {
+            forEachNeighbor(cp, prevSim, n -> tracked.compute(n, (k, v) -> {
+                if (v == null) return null;
+                return v - 1 <= 0 ? null : v - 1;
+            }));
         }
 
-        susChunks = sus;
-        deepslateBlocks = deepslate;
+        if (prevDeepslate != null && !prevDeepslate.isEmpty()) deepslateSet.removeAll(prevDeepslate);
+
+        ScanResult result = scanChunk(world, chunk, cp, o);
+
+        growthCounts.put(cp, result.notGrown());
+        fullyGrown.put(cp, result.hasGrown());
+        usedSimDist.put(cp, simDist);
+
+        if (result.hasGrown()) forEachNeighbor(cp, simDist, n -> tracked.merge(n, 1, Integer::sum));
+        if (result.notGrown() > 0) forEachNeighbor(cp, simDist, n -> heatmap.merge(n, result.notGrown(), Integer::sum));
+
+        if (!result.deepslate().isEmpty()) {
+            chunkDeepslate.put(cp, result.deepslate());
+            deepslateSet.addAll(result.deepslate());
+        }
     }
 
     private static boolean isBud(BlockState s) {
@@ -390,23 +400,23 @@ public class SusChunkFinder extends Module {
         return s.getBlock() == Blocks.AMETHYST_CLUSTER;
     }
 
-    private ChunkResult scanChunk(ClientWorld world, WorldChunk chunk, ChunkPos cp, Params p) {
+    private ScanResult scanChunk(ClientWorld world, WorldChunk chunk, ChunkPos cp, Opts o) {
         ChunkSection[] sections = chunk.getSectionArray();
         int bottomSection = chunk.getBottomSectionCoord();
         int startX = cp.getStartX();
         int startZ = cp.getStartZ();
 
         // Palette check: sections without any of these blocks are skipped entirely.
-        boolean useAmethystBlocks = p.amethyst() && !p.folia();
+        boolean useAmethystBlocks = o.amethyst() && !o.folia();
         Predicate<BlockState> growthFilter = s -> {
             Block b = s.getBlock();
-            return (p.kelp() && b == Blocks.KELP)
-                || (p.caveVines() && b == Blocks.CAVE_VINES)
-                || (p.vines() && b == Blocks.VINE)
+            return (o.kelp() && b == Blocks.KELP)
+                || (o.caveVines() && b == Blocks.CAVE_VINES)
+                || (o.vines() && b == Blocks.VINE)
                 || (useAmethystBlocks && (b == Blocks.AMETHYST_CLUSTER || isBud(s)))
-                || (p.bamboo() && b == Blocks.BAMBOO)
-                || (p.cocoa() && b == Blocks.COCOA)
-                || (p.beeNest() && b == Blocks.BEE_NEST);
+                || (o.bamboo() && b == Blocks.BAMBOO)
+                || (o.cocoa() && b == Blocks.COCOA)
+                || (o.beeNest() && b == Blocks.BEE_NEST);
         };
         Predicate<BlockState> deepslateFilter = s -> s.getBlock() == Blocks.DEEPSLATE;
 
@@ -414,7 +424,7 @@ public class SusChunkFinder extends Module {
         int grown = 0;
         boolean foundBuds = false;
         boolean foundClusters = false;
-        List<BlockPos> deepslate = new ArrayList<>();
+        Set<BlockPos> deepslate = new HashSet<>();
         BlockPos.Mutable other = new BlockPos.Mutable();
 
         for (int i = 0; i < sections.length; i++) {
@@ -423,13 +433,13 @@ public class SusChunkFinder extends Module {
 
             int sectionMinY = (bottomSection + i) << 4;
 
-            if (p.folia()) {
+            if (o.folia()) {
                 if (!foundBuds && section.hasAny(SusChunkFinder::isBud)) foundBuds = true;
                 if (!foundClusters && section.hasAny(SusChunkFinder::isCluster)) foundClusters = true;
             }
 
             boolean scanGrowth = section.hasAny(growthFilter);
-            boolean scanDeepslate = p.deepslate()
+            boolean scanDeepslate = o.deepslate()
                 && sectionMinY + 15 >= 0 && sectionMinY <= 60
                 && section.hasAny(deepslateFilter);
 
@@ -446,17 +456,17 @@ public class SusChunkFinder extends Module {
                         int bz = startZ + z;
 
                         if (scanGrowth) {
-                            if (p.kelp() && block == Blocks.KELP && state.contains(Properties.AGE_25)) {
+                            if (o.kelp() && block == Blocks.KELP && state.contains(Properties.AGE_25)) {
                                 boolean waterAbove = world.getBlockState(other.set(bx, by + 1, bz)).isOf(Blocks.WATER);
                                 if (state.get(Properties.AGE_25) != 25 && waterAbove) grown++;
                                 else notGrown++;
 
-                            } else if (p.caveVines() && block == Blocks.CAVE_VINES && state.contains(Properties.AGE_25)) {
+                            } else if (o.caveVines() && block == Blocks.CAVE_VINES && state.contains(Properties.AGE_25)) {
                                 boolean airBelow = world.getBlockState(other.set(bx, by - 1, bz)).isAir();
                                 if (state.get(Properties.AGE_25) != 25 && airBelow) grown++;
                                 else notGrown++;
 
-                            } else if (p.vines() && block == Blocks.VINE) {
+                            } else if (o.vines() && block == Blocks.VINE) {
                                 BlockState below = world.getBlockState(other.set(bx, by - 1, bz));
                                 if (!below.isOf(Blocks.VINE)) {
                                     if (!below.isAir()) {
@@ -478,18 +488,18 @@ public class SusChunkFinder extends Module {
                                 if (world.getBlockState(parent).isOf(Blocks.BUDDING_AMETHYST)) grown++;
                                 else notGrown++;
 
-                            } else if (p.bamboo() && block == Blocks.BAMBOO && state.contains(Properties.STAGE)) {
+                            } else if (o.bamboo() && block == Blocks.BAMBOO && state.contains(Properties.STAGE)) {
                                 BlockState above = world.getBlockState(other.set(bx, by + 1, bz));
                                 if (!above.isOf(Blocks.BAMBOO)) {
                                     if (state.get(Properties.STAGE) == 1) notGrown++;
                                     else if (above.isAir()) grown++;
                                 }
 
-                            } else if (p.cocoa() && block == Blocks.COCOA && state.contains(Properties.AGE_2)) {
+                            } else if (o.cocoa() && block == Blocks.COCOA && state.contains(Properties.AGE_2)) {
                                 if (state.get(Properties.AGE_2) == 2) notGrown++;
                                 else grown++;
 
-                            } else if (p.beeNest() && block == Blocks.BEE_NEST && state.contains(Properties.HONEY_LEVEL)) {
+                            } else if (o.beeNest() && block == Blocks.BEE_NEST && state.contains(Properties.HONEY_LEVEL)) {
                                 if (state.get(Properties.HONEY_LEVEL) == 5) notGrown++;
                                 else grown++;
                             }
@@ -498,7 +508,6 @@ public class SusChunkFinder extends Module {
                         if (scanDeepslate && block == Blocks.DEEPSLATE && state.contains(Properties.AXIS)
                             && state.get(Properties.AXIS) != Direction.Axis.Y && by >= 0 && by <= 60) {
 
-                            BlockPos pos = new BlockPos(bx, by, bz);
                             boolean buried = true;
                             for (Direction dir : Direction.values()) {
                                 if (world.getBlockState(other.set(bx, by, bz).offset(dir)).isAir()) {
@@ -506,19 +515,86 @@ public class SusChunkFinder extends Module {
                                     break;
                                 }
                             }
-                            if (buried) deepslate.add(pos);
+                            if (buried) deepslate.add(new BlockPos(bx, by, bz));
                         }
                     }
                 }
             }
         }
 
-        if (p.folia()) {
+        if (o.folia()) {
             if (foundBuds) grown++;
             else if (foundClusters) notGrown++;
         }
 
-        return new ChunkResult(notGrown, grown > 0, deepslate);
+        return new ScanResult(notGrown, grown > 0, deepslate);
+    }
+
+    // ---------- main thread ----------
+
+    @EventHandler
+    private void onTick(TickEvent.Post event) {
+        if (mc.world == null || mc.player == null || executors == null) return;
+
+        // New world / dimension: start over, like turning the module off and on
+        if (mc.world != lastWorld) {
+            restart();
+            return;
+        }
+
+        if (debugInfo.get() && mc.player.age % 40 == 0) printDebug();
+
+        if (--timer > 0) return;
+        timer = 2; // refresh the sus list every other tick
+
+        ClientWorld world = mc.world;
+        int minSensitivity = effectiveSensitivity();
+        Set<ChunkPos> sus = new HashSet<>();
+
+        for (Map.Entry<ChunkPos, Integer> entry : heatmap.entrySet()) {
+            ChunkPos pos = entry.getKey();
+            if (entry.getValue() < minSensitivity) continue;
+            if (tracked.containsKey(pos)) continue;
+            if (!world.getChunkManager().isChunkLoaded(pos.x, pos.z)) continue;
+
+            int neighbors = 0;
+            for (int dx = -1; dx <= 1; dx++) {
+                for (int dz = -1; dz <= 1; dz++) {
+                    if (dx == 0 && dz == 0) continue;
+                    if (loadedChunks.contains(new ChunkPos(pos.x + dx, pos.z + dz))) neighbors++;
+                }
+            }
+
+            if (neighbors >= 3) sus.add(pos);
+        }
+        susChunks = sus;
+
+        if (rotatedDeepslate.get()) {
+            deepslateSet.removeIf(p -> !world.getChunkManager().isChunkLoaded(p.getX() >> 4, p.getZ() >> 4));
+            deepslateBlocks = new ArrayList<>(deepslateSet);
+        } else {
+            deepslateBlocks = List.of();
+        }
+    }
+
+    private void printDebug() {
+        ChunkPos cp = mc.player.getChunkPos();
+        int heat = heatmap.getOrDefault(cp, 0);
+        int cover = tracked.getOrDefault(cp, 0);
+        int neighbors = 0;
+        for (int dx = -1; dx <= 1; dx++) {
+            for (int dz = -1; dz <= 1; dz++) {
+                if (dx == 0 && dz == 0) continue;
+                if (loadedChunks.contains(new ChunkPos(cp.x + dx, cp.z + dz))) neighbors++;
+            }
+        }
+
+        String brand = mc.getNetworkHandler() == null ? "?" : String.valueOf(mc.getNetworkHandler().getBrand());
+        info("Server " + brand + ", folia mode " + isDonutFolia() + ", render distance " + mc.options.getViewDistance().getValue()
+            + ", sim distance " + effectiveSimDist() + ", chunks tracked " + loadedChunks.size());
+        info("Chunk " + cp.x + ", " + cp.z + ": heat " + heat + " (needs " + effectiveSensitivity() + "), covered by grown plants "
+            + cover + ", loaded neighbors " + neighbors + " (needs 3), own growing count " + growthCounts.getOrDefault(cp, 0)
+            + ", flagged " + susChunks.contains(cp));
     }
 
     @EventHandler
