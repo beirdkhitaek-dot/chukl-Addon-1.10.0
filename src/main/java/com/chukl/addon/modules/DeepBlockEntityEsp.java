@@ -147,7 +147,6 @@ public class DeepBlockEntityEsp extends Module {
         executor = Executors.newSingleThreadExecutor(r -> {
             Thread t = new Thread(r, "DeepBlockEntityEsp-Scan");
             t.setDaemon(true);
-            t.setPriority(Thread.MIN_PRIORITY);
             return t;
         });
         found = List.of();
