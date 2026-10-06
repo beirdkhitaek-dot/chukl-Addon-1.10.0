@@ -51,8 +51,8 @@ public class LightFinder extends Module {
 
     private record ScanResult(List<LitBlock> blocks, List<LightSection> sections) {}
 
-    private static final int MAX_CANDIDATES = 20000;
-    private static final int MAX_LOS_CHECKS = 400;
+    private static final int MAX_CANDIDATES = 400000;
+    private static final int MAX_LOS_CHECKS = 20000;
 
     private final SettingGroup sgGeneral = settings.getDefaultGroup();
     private final SettingGroup sgRender = settings.createGroup("Render");
@@ -62,9 +62,9 @@ public class LightFinder extends Module {
     private final Setting<Integer> scanRadius = sgGeneral.add(new IntSetting.Builder()
         .name("scan-radius")
         .description("Chunks around you to scan.")
-        .defaultValue(6)
-        .range(1, 16)
-        .sliderRange(1, 12)
+        .defaultValue(12)
+        .range(1, 32)
+        .sliderRange(1, 32)
         .build()
     );
 
@@ -107,19 +107,19 @@ public class LightFinder extends Module {
     private final Setting<Integer> blockDistance = sgRender.add(new IntSetting.Builder()
         .name("block-render-distance")
         .description("Blocks mode: only draw lit blocks within this many blocks of you.")
-        .defaultValue(32)
-        .range(8, 128)
-        .sliderRange(8, 96)
+        .defaultValue(160)
+        .range(8, 512)
+        .sliderRange(8, 512)
         .visible(() -> renderMode.get() == RenderMode.Blocks)
         .build()
     );
 
     private final Setting<Integer> maxBlocks = sgRender.add(new IntSetting.Builder()
         .name("max-blocks")
-        .description("Blocks mode: most lit blocks drawn at once (nearest first). Lower = smoother on weak devices.")
-        .defaultValue(2000)
-        .range(100, 20000)
-        .sliderRange(100, 8000)
+        .description("Blocks mode: most lit blocks drawn at once (nearest first).")
+        .defaultValue(50000)
+        .range(100, 400000)
+        .sliderRange(100, 400000)
         .visible(() -> renderMode.get() == RenderMode.Blocks)
         .build()
     );
@@ -205,8 +205,7 @@ public class LightFinder extends Module {
         executor = Executors.newSingleThreadExecutor(r -> {
             Thread t = new Thread(r, "LightFinder-Scan");
             t.setDaemon(true);
-            t.setPriority(Thread.MIN_PRIORITY);
-            return t;
+                        return t;
         });
         clearData();
         timer = 0;
