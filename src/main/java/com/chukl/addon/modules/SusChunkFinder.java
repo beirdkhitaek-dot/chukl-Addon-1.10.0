@@ -94,6 +94,15 @@ public class SusChunkFinder extends Module {
         .build()
     );
 
+    private final Setting<Integer> scanThreads = sgGeneral.add(new IntSetting.Builder()
+        .name("scan-threads")
+        .description("How many threads scan chunks at the same time. More = faster scanning. Applies the next time you turn the module on.")
+        .defaultValue(Math.max(1, Math.min(8, Runtime.getRuntime().availableProcessors())))
+        .range(1, 16)
+        .sliderRange(1, 16)
+        .build()
+    );
+
     private final Setting<Boolean> kelp = sgGeneral.add(new BoolSetting.Builder()
         .name("kelp").description("Use kelp growth.").defaultValue(false).build());
 
@@ -123,15 +132,6 @@ public class SusChunkFinder extends Module {
         .name("rotated-deepslate")
         .description("Detect rotated deepslate buried between Y 0 and 60.")
         .defaultValue(false)
-        .build()
-    );
-
-    private final Setting<Integer> scanThreads = sgGeneral.add(new IntSetting.Builder()
-        .name("scan-threads")
-        .description("How many threads scan chunks at the same time. More = faster scanning. Applies the next time you turn the module on.")
-        .defaultValue(Math.max(1, Math.min(8, Runtime.getRuntime().availableProcessors())))
-        .range(1, 16)
-        .sliderRange(1, 16)
         .build()
     );
 
