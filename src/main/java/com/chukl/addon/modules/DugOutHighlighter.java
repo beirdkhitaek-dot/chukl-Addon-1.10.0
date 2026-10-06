@@ -274,7 +274,6 @@ public class DugOutHighlighter extends Module {
         executor = Executors.newSingleThreadExecutor(r -> {
             Thread t = new Thread(r, "DugOutHighlighter-Scan");
             t.setDaemon(true);
-            t.setPriority(Thread.MIN_PRIORITY);
             return t;
         });
         areas = List.of();
