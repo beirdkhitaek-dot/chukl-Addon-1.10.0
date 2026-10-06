@@ -46,8 +46,8 @@ import java.util.function.Predicate;
  * have not finished growing "heat up" all chunks around them. A chunk that is hot, is not covered by
  * fully grown plants, and has at least 3 loaded neighbors is marked as sus.
  *
- * Speed: chunks are scanned in parallel on several background threads, sections without anything
- * interesting are skipped, and the sus list refreshes every other tick.
+ * Performance: scanning runs on a low priority background thread, sections without anything
+ * interesting are skipped, and the sus list is rebuilt twice a second instead of every frame.
  */
 public class SusChunkFinder extends Module {
     private record ScanResult(int notGrown, boolean hasGrown, Set<BlockPos> deepslate) {}
@@ -91,15 +91,6 @@ public class SusChunkFinder extends Module {
         .defaultValue(81)
         .range(10, 255)
         .sliderRange(10, 255)
-        .build()
-    );
-
-    private final Setting<Integer> scanThreads = sgGeneral.add(new IntSetting.Builder()
-        .name("scan-threads")
-        .description("How many threads scan chunks at the same time. More = faster scanning. Applies the next time you turn the module on.")
-        .defaultValue(Math.max(1, Math.min(8, Runtime.getRuntime().availableProcessors())))
-        .range(1, 16)
-        .sliderRange(1, 16)
         .build()
     );
 
@@ -209,7 +200,7 @@ public class SusChunkFinder extends Module {
 
     private volatile Set<ChunkPos> susChunks = Set.of();
     private volatile List<BlockPos> deepslateBlocks = List.of();
-    private ExecutorService[] executors;
+    private ExecutorService executor;
     private ClientWorld lastWorld;
     private int timer;
 
@@ -224,34 +215,20 @@ public class SusChunkFinder extends Module {
 
     @Override
     public void onDeactivate() {
-        stopExecutors();
+        if (executor != null) executor.shutdownNow();
+        executor = null;
         lastWorld = null;
         clearData();
     }
 
-    private void stopExecutors() {
-        if (executors != null) {
-            for (ExecutorService e : executors) e.shutdownNow();
-        }
-        executors = null;
-    }
-
     private void restart() {
-        stopExecutors();
-
-        // One single-thread executor per worker. A given chunk always goes to the same worker, so two
-        // scans of the same chunk can never run at once, while different chunks scan in parallel.
-        int count = scanThreads.get();
-        executors = new ExecutorService[count];
-        for (int i = 0; i < count; i++) {
-            int id = i;
-            executors[i] = Executors.newSingleThreadExecutor(r -> {
-                Thread t = new Thread(r, "SusChunkFinder-Scan-" + id);
-                t.setDaemon(true);
-                return t;
-            });
-        }
-
+        if (executor != null) executor.shutdownNow();
+        executor = Executors.newSingleThreadExecutor(r -> {
+            Thread t = new Thread(r, "SusChunkFinder-Scan");
+            t.setDaemon(true);
+            t.setPriority(Thread.MIN_PRIORITY);
+            return t;
+        });
         clearData();
         lastWorld = mc.world;
         timer = 0;
@@ -314,17 +291,13 @@ public class SusChunkFinder extends Module {
     }
 
     private void queue(WorldChunk chunk) {
-        ExecutorService[] pool = executors;
-        if (pool == null || chunk == null || mc.world == null) return;
+        if (executor == null || chunk == null || mc.world == null) return;
 
         ClientWorld world = mc.world;
         Opts o = opts();
         int simDist = effectiveSimDist();
 
-        ChunkPos pos = chunk.getPos();
-        ExecutorService worker = pool[Math.floorMod(pos.x * 31 + pos.z, pool.length)];
-
-        worker.execute(() -> {
+        executor.execute(() -> {
             try {
                 updateChunk(world, chunk, o, simDist);
             } catch (Throwable t) {
@@ -527,7 +500,7 @@ public class SusChunkFinder extends Module {
 
     @EventHandler
     private void onTick(TickEvent.Post event) {
-        if (mc.world == null || mc.player == null || executors == null) return;
+        if (mc.world == null || mc.player == null || executor == null) return;
 
         // New world / dimension: start over, like turning the module off and on
         if (mc.world != lastWorld) {
@@ -536,7 +509,7 @@ public class SusChunkFinder extends Module {
         }
 
         if (--timer > 0) return;
-        timer = 2; // refresh the sus list every other tick
+        timer = 10; // twice a second
 
         ClientWorld world = mc.world;
         int minSensitivity = sensitivity.get();
