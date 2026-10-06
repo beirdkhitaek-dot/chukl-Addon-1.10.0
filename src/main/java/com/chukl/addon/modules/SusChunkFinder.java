@@ -135,13 +135,6 @@ public class SusChunkFinder extends Module {
         .build()
     );
 
-    private final Setting<Boolean> debugInfo = sgGeneral.add(new BoolSetting.Builder()
-        .name("debug-info")
-        .description("Every 2 seconds, prints the numbers behind the chunk you are standing in (heat, tracked, loaded neighbors). Use it to compare with Krypton.")
-        .defaultValue(false)
-        .build()
-    );
-
     // --- Render ---
 
     private final Setting<ShapeMode> chunkShapeMode = sgRender.add(new EnumSetting.Builder<ShapeMode>()
@@ -542,8 +535,6 @@ public class SusChunkFinder extends Module {
             return;
         }
 
-        if (debugInfo.get() && mc.player.age % 40 == 0) printDebug();
-
         if (--timer > 0) return;
         timer = 2; // refresh the sus list every other tick
 
@@ -575,23 +566,6 @@ public class SusChunkFinder extends Module {
         } else {
             deepslateBlocks = List.of();
         }
-    }
-
-    private void printDebug() {
-        ChunkPos cp = mc.player.getChunkPos();
-        int heat = heatmap.getOrDefault(cp, 0);
-        int cover = tracked.getOrDefault(cp, 0);
-        int neighbors = 0;
-        for (int dx = -1; dx <= 1; dx++) {
-            for (int dz = -1; dz <= 1; dz++) {
-                if (dx == 0 && dz == 0) continue;
-                if (loadedChunks.contains(new ChunkPos(cp.x + dx, cp.z + dz))) neighbors++;
-            }
-        }
-
-        info("Chunk " + cp.x + ", " + cp.z + ": heat " + heat + " (needs " + sensitivity.get() + "), covered by grown plants "
-            + cover + ", loaded neighbors " + neighbors + " (needs 3), own growing count " + growthCounts.getOrDefault(cp, 0)
-            + ", flagged " + susChunks.contains(cp));
     }
 
     @EventHandler
