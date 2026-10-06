@@ -4,6 +4,8 @@ import com.chukl.addon.modules.DeepBlockEntityEsp;
 import com.chukl.addon.modules.DugOutHighlighter;
 import com.chukl.addon.modules.LightFinder;
 import com.chukl.addon.modules.SusChunkFinder;
+import com.chukl.addon.modules.VulxtsSusChunk;
+import com.chukl.addon.modules.WaterSusChunk;
 import com.mojang.logging.LogUtils;
 import meteordevelopment.meteorclient.addons.MeteorAddon;
 import meteordevelopment.meteorclient.systems.modules.Category;
@@ -22,6 +24,8 @@ public class ChuklAddon extends MeteorAddon {
         Modules.get().add(new DugOutHighlighter());
         Modules.get().add(new SusChunkFinder());
         Modules.get().add(new LightFinder());
+        Modules.get().add(new WaterSusChunk());
+        Modules.get().add(new VulxtsSusChunk());
     }
 
     @Override
