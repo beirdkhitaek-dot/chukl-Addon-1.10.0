@@ -2,7 +2,6 @@ package com.chukl.addon.modules;
 
 import com.chukl.addon.ChuklAddon;
 import meteordevelopment.meteorclient.events.render.Render3DEvent;
-import meteordevelopment.meteorclient.events.world.ChunkDataEvent;
 import meteordevelopment.meteorclient.events.world.TickEvent;
 import meteordevelopment.meteorclient.renderer.ShapeMode;
 import meteordevelopment.meteorclient.settings.BoolSetting;
@@ -46,8 +45,8 @@ import java.util.function.Predicate;
  * have not finished growing "heat up" all chunks around them. A chunk that is hot, is not covered by
  * fully grown plants, and has at least 3 loaded neighbors is marked as sus.
  *
- * Performance: scanning runs on a low priority background thread, sections without anything
- * interesting are skipped, and the sus list is rebuilt twice a second instead of every frame.
+ * Speed: chunks are scanned in parallel on several background threads, sections without anything
+ * interesting are skipped, and the sus list refreshes every other tick.
  */
 public class SusChunkFinder extends Module {
     private record ScanResult(int notGrown, boolean hasGrown, Set<BlockPos> deepslate) {}
@@ -80,7 +79,7 @@ public class SusChunkFinder extends Module {
 
     private final Setting<Boolean> smartAdjustment = sgGeneral.add(new BoolSetting.Builder()
         .name("smart-adjustment")
-        .description("Never uses a simulation distance larger than your render distance. Approximation of the original option.")
+        .description("Smart detection: only scans and draws chunks inside your render distance, and makes chunks with more heat draw stronger. Never changes your sensitivity or simulation distance.")
         .defaultValue(true)
         .build()
     );
@@ -122,6 +121,13 @@ public class SusChunkFinder extends Module {
     private final Setting<Boolean> rotatedDeepslate = sgGeneral.add(new BoolSetting.Builder()
         .name("rotated-deepslate")
         .description("Detect rotated deepslate buried between Y 0 and 60.")
+        .defaultValue(false)
+        .build()
+    );
+
+    private final Setting<Boolean> debugInfo = sgGeneral.add(new BoolSetting.Builder()
+        .name("debug-info")
+        .description("Every 2 seconds, prints the numbers behind the chunk you are standing in (heat, tracked, loaded neighbors). Use it to compare with Krypton.")
         .defaultValue(false)
         .build()
     );
@@ -169,6 +175,15 @@ public class SusChunkFinder extends Module {
         .build()
     );
 
+    private final Setting<Integer> chunkInset = sgRender.add(new IntSetting.Builder()
+        .name("chunk-inset")
+        .description("Shrinks each chunk square by this many blocks on every side, so the layer is smaller and neighbors don't merge into one big sheet.")
+        .defaultValue(2)
+        .range(0, 7)
+        .sliderRange(0, 7)
+        .build()
+    );
+
     private final Setting<SettingColor> deepslateColor = sgRender.add(new ColorSetting.Builder()
         .name("deepslate-color")
         .description("Outline color of suspicious rotated deepslate blocks.")
@@ -198,11 +213,12 @@ public class SusChunkFinder extends Module {
     private final Set<ChunkPos> loadedChunks = ConcurrentHashMap.newKeySet();
     private final Set<BlockPos> deepslateSet = ConcurrentHashMap.newKeySet();
 
-    private volatile Set<ChunkPos> susChunks = Set.of();
+    private volatile Map<ChunkPos, Integer> susChunks = Map.of();
     private volatile List<BlockPos> deepslateBlocks = List.of();
-    private ExecutorService executor;
+    private ExecutorService[] executors;
     private ClientWorld lastWorld;
     private int timer;
+    private final Map<ChunkPos, WorldChunk> seenChunks = new java.util.HashMap<>();
 
     public SusChunkFinder() {
         super(ChuklAddon.CATEGORY, "sus-chunk-finder", "Finds probable base locations using plant/amethyst growth and rotated deepslate.");
@@ -215,24 +231,37 @@ public class SusChunkFinder extends Module {
 
     @Override
     public void onDeactivate() {
-        if (executor != null) executor.shutdownNow();
-        executor = null;
+        stopExecutors();
         lastWorld = null;
         clearData();
     }
 
+    private void stopExecutors() {
+        if (executors != null) {
+            for (ExecutorService e : executors) e.shutdownNow();
+        }
+        executors = null;
+    }
+
     private void restart() {
-        if (executor != null) executor.shutdownNow();
-        executor = Executors.newSingleThreadExecutor(r -> {
-            Thread t = new Thread(r, "SusChunkFinder-Scan");
-            t.setDaemon(true);
-            t.setPriority(Thread.MIN_PRIORITY);
-            return t;
-        });
+        stopExecutors();
+
+        // One single-thread executor per worker. A given chunk always goes to the same worker, so two
+        // scans of the same chunk can never run at once, while different chunks scan in parallel.
+        int count = Math.max(1, Math.min(8, Runtime.getRuntime().availableProcessors()));
+        executors = new ExecutorService[count];
+        for (int i = 0; i < count; i++) {
+            int id = i;
+            executors[i] = Executors.newSingleThreadExecutor(r -> {
+                Thread t = new Thread(r, "SusChunkFinder-Scan-" + id);
+                t.setDaemon(true);
+                return t;
+            });
+        }
+
         clearData();
         lastWorld = mc.world;
         timer = 0;
-        scanLoadedChunks();
     }
 
     private void clearData() {
@@ -243,8 +272,9 @@ public class SusChunkFinder extends Module {
         usedSimDist.clear();
         chunkDeepslate.clear();
         loadedChunks.clear();
+        seenChunks.clear();
         deepslateSet.clear();
-        susChunks = Set.of();
+        susChunks = Map.of();
         deepslateBlocks = List.of();
     }
 
@@ -262,42 +292,56 @@ public class SusChunkFinder extends Module {
     }
 
     private int effectiveSimDist() {
-        int dist = simulationDistance.get();
-        if (smartAdjustment.get()) {
-            int view = mc.options.getViewDistance().getValue();
-            dist = Math.min(dist, Math.max(2, view));
-        }
-        return dist;
+        return simulationDistance.get();
     }
 
-    /** Scans the chunks that are already loaded (when the module is turned on or the world changes). */
-    private void scanLoadedChunks() {
+    /** Your sensitivity is used exactly as set. Smart Adjustment does not change it. */
+    private int effectiveSensitivity() {
+        return sensitivity.get();
+    }
+
+    /**
+     * Looks for chunks that just loaded (or were sent again by the server, which creates a new chunk
+     * object) and scans each one once. Checked every tick, so a chunk is scanned the moment it arrives.
+     */
+    private void scanNewChunks() {
         if (mc.world == null || mc.player == null) return;
 
+        var manager = mc.world.getChunkManager();
         ChunkPos center = mc.player.getChunkPos();
-        int radius = mc.options.getViewDistance().getValue() + 2;
+        int radius = mc.options.getViewDistance().getValue() + (smartAdjustment.get() ? 0 : 2);
 
         for (int cx = center.x - radius; cx <= center.x + radius; cx++) {
             for (int cz = center.z - radius; cz <= center.z + radius; cz++) {
-                if (!mc.world.getChunkManager().isChunkLoaded(cx, cz)) continue;
-                queue(mc.world.getChunkManager().getWorldChunk(cx, cz));
+                if (!manager.isChunkLoaded(cx, cz)) continue;
+
+                WorldChunk chunk = manager.getWorldChunk(cx, cz);
+                if (chunk == null) continue;
+
+                ChunkPos pos = new ChunkPos(cx, cz);
+                if (seenChunks.get(pos) != chunk) {
+                    seenChunks.put(pos, chunk);
+                    queue(chunk);
+                }
             }
         }
-    }
 
-    @EventHandler
-    private void onChunkData(ChunkDataEvent event) {
-        queue(event.chunk);
+        // Forget unloaded chunks so they get scanned again when they come back
+        seenChunks.keySet().removeIf(pos -> !manager.isChunkLoaded(pos.x, pos.z));
     }
 
     private void queue(WorldChunk chunk) {
-        if (executor == null || chunk == null || mc.world == null) return;
+        ExecutorService[] pool = executors;
+        if (pool == null || chunk == null || mc.world == null) return;
 
         ClientWorld world = mc.world;
         Opts o = opts();
         int simDist = effectiveSimDist();
 
-        executor.execute(() -> {
+        ChunkPos pos = chunk.getPos();
+        ExecutorService worker = pool[Math.floorMod(pos.x * 31 + pos.z, pool.length)];
+
+        worker.execute(() -> {
             try {
                 updateChunk(world, chunk, o, simDist);
             } catch (Throwable t) {
@@ -500,7 +544,7 @@ public class SusChunkFinder extends Module {
 
     @EventHandler
     private void onTick(TickEvent.Post event) {
-        if (mc.world == null || mc.player == null || executor == null) return;
+        if (mc.world == null || mc.player == null || executors == null) return;
 
         // New world / dimension: start over, like turning the module off and on
         if (mc.world != lastWorld) {
@@ -508,12 +552,16 @@ public class SusChunkFinder extends Module {
             return;
         }
 
+        scanNewChunks();
+
+        if (debugInfo.get() && mc.player.age % 40 == 0) printDebug();
+
         if (--timer > 0) return;
-        timer = 10; // twice a second
+        timer = 2; // refresh the sus list every other tick
 
         ClientWorld world = mc.world;
-        int minSensitivity = sensitivity.get();
-        Set<ChunkPos> sus = new HashSet<>();
+        int minSensitivity = effectiveSensitivity();
+        Map<ChunkPos, Integer> sus = new java.util.HashMap<>();
 
         for (Map.Entry<ChunkPos, Integer> entry : heatmap.entrySet()) {
             ChunkPos pos = entry.getKey();
@@ -529,7 +577,7 @@ public class SusChunkFinder extends Module {
                 }
             }
 
-            if (neighbors >= 3) sus.add(pos);
+            if (neighbors >= 3) sus.put(pos, entry.getValue());
         }
         susChunks = sus;
 
@@ -541,23 +589,61 @@ public class SusChunkFinder extends Module {
         }
     }
 
+    private void printDebug() {
+        ChunkPos cp = mc.player.getChunkPos();
+        int heat = heatmap.getOrDefault(cp, 0);
+        int cover = tracked.getOrDefault(cp, 0);
+        int neighbors = 0;
+        for (int dx = -1; dx <= 1; dx++) {
+            for (int dz = -1; dz <= 1; dz++) {
+                if (dx == 0 && dz == 0) continue;
+                if (loadedChunks.contains(new ChunkPos(cp.x + dx, cp.z + dz))) neighbors++;
+            }
+        }
+
+        String brand = mc.getNetworkHandler() == null ? "?" : String.valueOf(mc.getNetworkHandler().getBrand());
+        info("Server " + brand + ", folia mode " + isDonutFolia() + ", render distance " + mc.options.getViewDistance().getValue()
+            + ", sim distance " + effectiveSimDist() + ", chunks tracked " + loadedChunks.size());
+        info("Chunk " + cp.x + ", " + cp.z + ": heat " + heat + " (needs " + effectiveSensitivity() + "), covered by grown plants "
+            + cover + ", loaded neighbors " + neighbors + " (needs 3), own growing count " + growthCounts.getOrDefault(cp, 0)
+            + ", flagged " + susChunks.containsKey(cp));
+    }
+
     @EventHandler
     private void onRender(Render3DEvent event) {
         if (mc.world == null || mc.player == null) return;
 
-        Set<ChunkPos> chunks = susChunks;
+        Map<ChunkPos, Integer> chunks = susChunks;
         if (!chunks.isEmpty()) {
             double y = chunkY.get();
             double thickness = chunkThickness.get();
+            int inset = chunkInset.get();
             SettingColor fill = chunkSideColor.get();
-            Color side = new Color(fill.r, fill.g, fill.b, alpha.get());
             SettingColor line = chunkLineColor.get();
             ShapeMode mode = chunkShapeMode.get();
+            int baseAlpha = alpha.get();
+            boolean smart = smartAdjustment.get();
+            int view = mc.options.getViewDistance().getValue();
+            ChunkPos here = mc.player.getChunkPos();
+            int sens = Math.max(1, sensitivity.get());
 
-            for (ChunkPos cp : chunks) {
+            for (Map.Entry<ChunkPos, Integer> entry : chunks.entrySet()) {
+                ChunkPos cp = entry.getKey();
+
+                int a = baseAlpha;
+                if (smart) {
+                    if (Math.max(Math.abs(cp.x - here.x), Math.abs(cp.z - here.z)) > view) continue;
+
+                    // Hotter chunks draw stronger: 40% opacity at the threshold up to 100% at 4x the threshold
+                    double strength = Math.min(1.0, 0.4 + 0.6 * (entry.getValue() / (double) (sens * 4)));
+                    a = Math.max(10, (int) (baseAlpha * strength));
+                }
+
+                Color side = new Color(fill.r, fill.g, fill.b, a);
+
                 event.renderer.box(
-                    cp.getStartX(), y, cp.getStartZ(),
-                    cp.getStartX() + 16, y + thickness, cp.getStartZ() + 16,
+                    cp.getStartX() + inset, y, cp.getStartZ() + inset,
+                    cp.getStartX() + 16 - inset, y + thickness, cp.getStartZ() + 16 - inset,
                     side, line, mode, 0
                 );
             }
