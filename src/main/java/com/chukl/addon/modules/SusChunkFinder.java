@@ -75,8 +75,8 @@ public class SusChunkFinder extends Module {
         .name("sensitivity")
         .description("Minimum number of unfinished growing things needed to mark a chunk as sus.")
         .defaultValue(5)
-        .range(1, 20)
-        .sliderRange(1, 20)
+        .range(1, 50)
+        .sliderRange(1, 30)
         .build()
     );
 
@@ -92,6 +92,34 @@ public class SusChunkFinder extends Module {
         .description("Smart mode: a single sus chunk with nobody else around is only shown if its heat is at least double your sensitivity. Removes most false positives.")
         .defaultValue(true)
         .visible(smartAdjustment::get)
+        .build()
+    );
+
+    private final Setting<Double> noiseMultiplier = sgGeneral.add(new DoubleSetting.Builder()
+        .name("noise-multiplier")
+        .description("How hot a lone chunk must be to survive the noise filter, as a multiple of your sensitivity. Higher = stricter.")
+        .defaultValue(2.0)
+        .range(1.0, 5.0)
+        .sliderRange(1.0, 5.0)
+        .visible(() -> smartAdjustment.get() && noiseFilter.get())
+        .build()
+    );
+
+    private final Setting<Integer> minNeighbors = sgGeneral.add(new IntSetting.Builder()
+        .name("min-loaded-neighbors")
+        .description("A chunk is only judged once this many of its 8 neighbors are loaded. Higher = fewer false flags at the edge of your loaded area, 0 = judge immediately.")
+        .defaultValue(3)
+        .range(0, 8)
+        .sliderRange(0, 8)
+        .build()
+    );
+
+    private final Setting<Integer> coverTolerance = sgGeneral.add(new IntSetting.Builder()
+        .name("cover-tolerance")
+        .description("How many fully grown plant chunks nearby cancel a chunk out. 1 = any grown plant cancels it (strict), higher = a chunk is still flagged unless several grown plant chunks surround it.")
+        .defaultValue(1)
+        .range(1, 10)
+        .sliderRange(1, 10)
         .build()
     );
 
@@ -596,11 +624,13 @@ public class SusChunkFinder extends Module {
         ClientWorld world = mc.world;
         int minSensitivity = effectiveSensitivity();
         Map<ChunkPos, Integer> sus = new java.util.HashMap<>();
+        int coverTol = coverTolerance.get();
+        int neededNeighbors = minNeighbors.get();
 
         for (Map.Entry<ChunkPos, Integer> entry : heatmap.entrySet()) {
             ChunkPos pos = entry.getKey();
             if (entry.getValue() < minSensitivity) continue;
-            if (tracked.containsKey(pos)) continue;
+            if (tracked.getOrDefault(pos, 0) >= coverTol) continue;
             if (!world.getChunkManager().isChunkLoaded(pos.x, pos.z)) continue;
 
             int neighbors = 0;
@@ -611,7 +641,7 @@ public class SusChunkFinder extends Module {
                 }
             }
 
-            if (neighbors >= 3) sus.put(pos, entry.getValue());
+            if (neighbors >= neededNeighbors) sus.put(pos, entry.getValue());
         }
         if (smartAdjustment.get()) applySmartMode(sus, minSensitivity);
         else {
@@ -637,6 +667,7 @@ public class SusChunkFinder extends Module {
         List<Zone> found = new ArrayList<>();
         Set<ChunkPos> seen = new HashSet<>();
         boolean filter = noiseFilter.get();
+        double mult = noiseMultiplier.get();
 
         for (ChunkPos start : new ArrayList<>(sus.keySet())) {
             if (!seen.add(start)) continue;
@@ -666,12 +697,12 @@ public class SusChunkFinder extends Module {
                 total += heat;
             }
 
-            if (filter && members.size() == 1 && max < sens * 2) {
+            if (filter && members.size() == 1 && max < sens * mult) {
                 for (ChunkPos c : members) sus.remove(c); // lone weak chunk = probably noise
                 continue;
             }
 
-            int lvl = (members.size() >= 4 || max >= sens * 4) ? 2 : (members.size() >= 2 || max >= sens * 2) ? 1 : 0;
+            int lvl = (members.size() >= 4 || max >= sens * mult * 2) ? 2 : (members.size() >= 2 || max >= sens * mult) ? 1 : 0;
             for (ChunkPos c : members) level.put(c, lvl);
             found.add(new Zone(wx / total, wz / total, members.size(), max, lvl));
         }
@@ -707,7 +738,7 @@ public class SusChunkFinder extends Module {
         info("Server " + brand + ", folia mode " + isDonutFolia() + ", render distance " + mc.options.getViewDistance().getValue()
             + ", sim distance " + effectiveSimDist() + ", chunks tracked " + loadedChunks.size());
         info("Chunk " + cp.x + ", " + cp.z + ": heat " + heat + " (needs " + effectiveSensitivity() + "), covered by grown plants "
-            + cover + ", loaded neighbors " + neighbors + " (needs 3), own growing count " + growthCounts.getOrDefault(cp, 0)
+            + cover + " (cancels at " + coverTolerance.get() + ")" + ", loaded neighbors " + neighbors + " (needs " + minNeighbors.get() + "), own growing count " + growthCounts.getOrDefault(cp, 0)
             + ", flagged " + susChunks.containsKey(cp));
     }
 
