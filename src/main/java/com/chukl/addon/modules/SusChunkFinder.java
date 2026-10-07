@@ -63,8 +63,8 @@ public class SusChunkFinder extends Module {
         .name("simulation-distance")
         .description("Chunk radius around growing plants that is considered 'currently loaded' and ignored. 0 = only the chunk the plants are in, 1 = 3x3 chunks, 2 = 5x5.")
         .defaultValue(4)
-        .range(0, 16)
-        .sliderRange(0, 16)
+        .range(0, 10)
+        .sliderRange(0, 10)
         .build()
     );
 
