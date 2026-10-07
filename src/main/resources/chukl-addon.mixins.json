@@ -1,0 +1,17 @@
+{
+  "required": true,
+  "package": "com.chukl.addon.mixin",
+  "compatibilityLevel": "JAVA_21",
+  "client": [
+    "CameraMixin",
+    "ClientPlayerEntityMixin",
+    "EntityMixin",
+    "InputAccessor",
+    "KeyboardInputMixin",
+    "MouseMixin"
+  ],
+  "injectors": {
+    "defaultRequire": 0
+  },
+  "refmap": "chukl-addon-refmap.json"
+}

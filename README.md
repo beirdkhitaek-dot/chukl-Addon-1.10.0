@@ -9,6 +9,8 @@ A Meteor Client addon for Minecraft 1.21.11 (Fabric).
 - **Light Finder** - highlights underground light, which can reveal hidden bases.
 - **Water Sus Chunk** (`water-suschunk`) - Water Client's Sus Chunk Finder: amethyst clusters plus underground chests, with flashing base chunks.
 - **Vulxts Sus Chunk** (`vulxts-suschunk`) - Vulxts' Sus Chunk Finder: weighted amethyst/kelp/bamboo/berries/vines/dripstone scoring with smart zone merging.
+- **Vulxts Freecam** (`vulxts-freecam`) - Vulxts' Freecam: detached camera, your body keeps walking, scroll wheel changes speed.
+- **Vulxts FreeLook** (`vulxts-freelook`) - Vulxts' FreeLook: rotate the camera or the player independently in third person, optional see-through-walls.
 
 ## Building
 Push to GitHub. The **Build** workflow produces the jar as an artifact (Actions -> latest run -> Artifacts).

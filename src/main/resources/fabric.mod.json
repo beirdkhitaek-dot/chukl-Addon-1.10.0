@@ -4,11 +4,15 @@
   "version": "${version}",
   "name": "ChuklAddon",
   "description": "A Meteor Client addon with block entity and dug out area highlighters.",
-  "authors": ["Chukl"],
+  "authors": [
+    "Chukl"
+  ],
   "contact": {},
   "environment": "client",
   "entrypoints": {
-    "meteor": ["com.chukl.addon.ChuklAddon"]
+    "meteor": [
+      "com.chukl.addon.ChuklAddon"
+    ]
   },
   "custom": {
     "meteor-client:color": "0,200,255"
@@ -17,5 +21,8 @@
     "java": ">=21",
     "minecraft": "${mc_version}",
     "meteor-client": "*"
-  }
+  },
+  "mixins": [
+    "chukl-addon.mixins.json"
+  ]
 }
