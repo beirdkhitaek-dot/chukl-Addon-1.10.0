@@ -26,7 +26,6 @@ import net.minecraft.util.math.Direction;
 import net.minecraft.world.chunk.ChunkSection;
 import net.minecraft.world.chunk.WorldChunk;
 
-import java.util.ArrayDeque;
 import java.util.ArrayList;
 import java.util.HashSet;
 import java.util.List;
@@ -51,8 +50,6 @@ import java.util.function.Predicate;
  */
 public class SusChunkFinder extends Module {
     private record ScanResult(int notGrown, boolean hasGrown, Set<BlockPos> deepslate) {}
-
-    private record Zone(double centerX, double centerZ, int size, int maxHeat, int level) {}
 
     private record Opts(boolean kelp, boolean caveVines, boolean vines, boolean amethyst, boolean folia,
                         boolean bamboo, boolean cocoa, boolean beeNest, boolean deepslate) {}
@@ -82,32 +79,8 @@ public class SusChunkFinder extends Module {
 
     private final Setting<Boolean> smartAdjustment = sgGeneral.add(new BoolSetting.Builder()
         .name("smart-adjustment")
-        .description("Smart mode: groups nearby sus chunks into zones, drops lone weak chunks, rates each zone (low/medium/high confidence) and draws stronger zones brighter. Only draws chunks inside your render distance. Never changes your sensitivity or simulation distance.")
+        .description("Smart detection: only scans and draws chunks inside your render distance, and makes chunks with more heat draw stronger. Never changes your sensitivity or simulation distance.")
         .defaultValue(true)
-        .build()
-    );
-
-    private final Setting<Boolean> noiseFilter = sgGeneral.add(new BoolSetting.Builder()
-        .name("noise-filter")
-        .description("Smart mode: a single sus chunk with nobody else around is only shown if its heat is at least double your sensitivity. Removes most false positives.")
-        .defaultValue(true)
-        .visible(smartAdjustment::get)
-        .build()
-    );
-
-    private final Setting<Boolean> zoneMarker = sgGeneral.add(new BoolSetting.Builder()
-        .name("zone-marker")
-        .description("Smart mode: draws a tall marker at the center of every zone so you can spot it from far away.")
-        .defaultValue(true)
-        .visible(smartAdjustment::get)
-        .build()
-    );
-
-    private final Setting<Boolean> notifyZones = sgGeneral.add(new BoolSetting.Builder()
-        .name("notify-zones")
-        .description("Smart mode: prints the coordinates in chat when a new high-confidence zone is found.")
-        .defaultValue(false)
-        .visible(smartAdjustment::get)
         .build()
     );
 
@@ -241,10 +214,6 @@ public class SusChunkFinder extends Module {
     private final Set<BlockPos> deepslateSet = ConcurrentHashMap.newKeySet();
 
     private volatile Map<ChunkPos, Integer> susChunks = Map.of();
-    /** Smart mode: confidence (0 low, 1 medium, 2 high) of the zone each sus chunk belongs to. */
-    private volatile Map<ChunkPos, Integer> susLevel = Map.of();
-    private volatile List<Zone> zones = List.of();
-    private final Set<Long> notifiedZones = new java.util.HashSet<>();
     private volatile List<BlockPos> deepslateBlocks = List.of();
     private ExecutorService[] executors;
     private ClientWorld lastWorld;
@@ -306,9 +275,6 @@ public class SusChunkFinder extends Module {
         seenChunks.clear();
         deepslateSet.clear();
         susChunks = Map.of();
-        susLevel = Map.of();
-        zones = List.of();
-        notifiedZones.clear();
         deepslateBlocks = List.of();
     }
 
@@ -613,11 +579,6 @@ public class SusChunkFinder extends Module {
 
             if (neighbors >= 3) sus.put(pos, entry.getValue());
         }
-        if (smartAdjustment.get()) applySmartMode(sus, minSensitivity);
-        else {
-            susLevel = Map.of();
-            zones = List.of();
-        }
         susChunks = sus;
 
         if (rotatedDeepslate.get()) {
@@ -625,69 +586,6 @@ public class SusChunkFinder extends Module {
             deepslateBlocks = new ArrayList<>(deepslateSet);
         } else {
             deepslateBlocks = List.of();
-        }
-    }
-
-    /**
-     * Smart mode. Groups sus chunks that touch (or are one chunk apart) into zones, removes lone weak chunks,
-     * and rates every zone: high = 4+ chunks or very hot, medium = 2+ chunks or hot, low = everything else.
-     */
-    private void applySmartMode(Map<ChunkPos, Integer> sus, int sens) {
-        Map<ChunkPos, Integer> level = new java.util.HashMap<>();
-        List<Zone> found = new ArrayList<>();
-        Set<ChunkPos> seen = new HashSet<>();
-        boolean filter = noiseFilter.get();
-
-        for (ChunkPos start : new ArrayList<>(sus.keySet())) {
-            if (!seen.add(start)) continue;
-
-            List<ChunkPos> members = new ArrayList<>();
-            ArrayDeque<ChunkPos> queue = new ArrayDeque<>();
-            queue.add(start);
-            while (!queue.isEmpty()) {
-                ChunkPos c = queue.poll();
-                members.add(c);
-                for (int dx = -2; dx <= 2; dx++) {
-                    for (int dz = -2; dz <= 2; dz++) {
-                        if (dx == 0 && dz == 0) continue;
-                        ChunkPos n = new ChunkPos(c.x + dx, c.z + dz);
-                        if (sus.containsKey(n) && seen.add(n)) queue.add(n);
-                    }
-                }
-            }
-
-            int max = 0;
-            double wx = 0, wz = 0, total = 0;
-            for (ChunkPos c : members) {
-                int heat = sus.get(c);
-                max = Math.max(max, heat);
-                wx += (c.x * 16 + 8) * (double) heat;
-                wz += (c.z * 16 + 8) * (double) heat;
-                total += heat;
-            }
-
-            if (filter && members.size() == 1 && max < sens * 2) {
-                for (ChunkPos c : members) sus.remove(c); // lone weak chunk = probably noise
-                continue;
-            }
-
-            int lvl = (members.size() >= 4 || max >= sens * 4) ? 2 : (members.size() >= 2 || max >= sens * 2) ? 1 : 0;
-            for (ChunkPos c : members) level.put(c, lvl);
-            found.add(new Zone(wx / total, wz / total, members.size(), max, lvl));
-        }
-
-        susLevel = level;
-        zones = found;
-
-        if (notifyZones.get()) {
-            for (Zone z : found) {
-                if (z.level() < 2) continue;
-                long key = ChunkPos.toLong((int) Math.floor(z.centerX() / 64), (int) Math.floor(z.centerZ() / 64));
-                if (notifiedZones.add(key)) {
-                    info("High-confidence sus zone at " + (int) z.centerX() + ", " + (int) z.centerZ()
-                        + " (" + z.size() + " chunk" + (z.size() == 1 ? "" : "s") + ", heat " + z.maxHeat() + ")");
-                }
-            }
         }
     }
 
@@ -728,7 +626,6 @@ public class SusChunkFinder extends Module {
             int view = mc.options.getViewDistance().getValue();
             ChunkPos here = mc.player.getChunkPos();
             int sens = Math.max(1, sensitivity.get());
-            Map<ChunkPos, Integer> levels = susLevel;
 
             for (Map.Entry<ChunkPos, Integer> entry : chunks.entrySet()) {
                 ChunkPos cp = entry.getKey();
@@ -739,9 +636,6 @@ public class SusChunkFinder extends Module {
 
                     // Hotter chunks draw stronger: 40% opacity at the threshold up to 100% at 4x the threshold
                     double strength = Math.min(1.0, 0.4 + 0.6 * (entry.getValue() / (double) (sens * 4)));
-                    // Zones with more evidence draw brighter: low 60%, medium 80%, high 100%
-                    int lvl = levels.getOrDefault(cp, 0);
-                    strength *= 0.6 + 0.2 * lvl;
                     a = Math.max(10, (int) (baseAlpha * strength));
                 }
 
@@ -752,23 +646,6 @@ public class SusChunkFinder extends Module {
                     cp.getStartX() + 16 - inset, y + thickness, cp.getStartZ() + 16 - inset,
                     side, line, mode, 0
                 );
-            }
-        }
-
-        if (smartAdjustment.get() && zoneMarker.get()) {
-            SettingColor markerBase = chunkLineColor.get();
-            int view = mc.options.getViewDistance().getValue();
-            ChunkPos here = mc.player.getChunkPos();
-
-            for (Zone z : zones) {
-                if (Math.max(Math.abs((int) Math.floor(z.centerX() / 16) - here.x),
-                    Math.abs((int) Math.floor(z.centerZ() / 16) - here.z)) > view) continue;
-
-                double half = 0.5 + z.level();
-                Color marker = new Color(markerBase.r, markerBase.g, markerBase.b, Math.max(60, alpha.get()));
-                event.renderer.box(z.centerX() - half, chunkY.get(), z.centerZ() - half,
-                    z.centerX() + half, chunkY.get() + 24 + z.level() * 16, z.centerZ() + half,
-                    marker, marker, ShapeMode.Lines, 0);
             }
         }
 
