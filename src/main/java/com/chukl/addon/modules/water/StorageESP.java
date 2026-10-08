@@ -6,7 +6,6 @@ import com.chukl.addon.water.ModuleManager;
 import com.chukl.addon.water.BlocksSetting;
 import com.chukl.addon.water.Setting;
 import com.chukl.addon.water.RenderUtils;
-import com.water.utils.renderer.StorageTracerRenderer;
 import java.awt.Color;
 import java.util.ArrayList;
 import java.util.Collections;
@@ -96,7 +95,7 @@ public final class StorageESP extends WModule {
    private int lastCenterCX = Integer.MIN_VALUE;
    private int lastCenterCZ = Integer.MIN_VALUE;
    private RenderUtils.PersistentBatch fillBatch;
-   private StorageTracerRenderer tracerBatch;
+   private RenderUtils.PersistentBatch tracerBatch;
    private boolean lastChests;
    private boolean lastEnderChests;
    private boolean lastSpawners;
@@ -233,7 +232,7 @@ public final class StorageESP extends WModule {
       this.scannedChunks.clear();
       this.scanTick = 0;
       this.fillBatch = RenderUtils.createStorageBoxBatch();
-      this.tracerBatch = new StorageTracerRenderer();
+      this.tracerBatch = RenderUtils.createTracerBatch();
       this.lastChests = this.chests.getValue();
       this.lastEnderChests = this.enderChests.getValue();
       this.lastSpawners = this.spawners.getValue();
@@ -647,7 +646,7 @@ public final class StorageESP extends WModule {
          }
 
          if (this.tracerBatch == null) {
-            this.tracerBatch = new StorageTracerRenderer();
+            this.tracerBatch = RenderUtils.createTracerBatch();
          }
 
          Camera cam = RenderUtils.getCamera();

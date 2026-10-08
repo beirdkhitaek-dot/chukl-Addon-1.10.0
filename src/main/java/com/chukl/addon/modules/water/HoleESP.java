@@ -130,9 +130,6 @@ public final class HoleESP extends WModule {
                try {
                   immediate.draw();
                } finally {
-                  if (depthWasEnabled) {
-                  }
-
                   allocator.close();
                }
             }

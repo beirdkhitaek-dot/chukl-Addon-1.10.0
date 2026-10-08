@@ -176,6 +176,22 @@ public final class RenderUtils {
         }
     }
 
+    /** Draws a filled triangle right now (world coordinates). Only works during a render event. */
+    public static void triangleWorld(double x1, double y1, double z1, double x2, double y2, double z2,
+                                     double x3, double y3, double z3, Color color) {
+        Render3DEvent e = current;
+        if (e == null) return;
+        // a quad whose last two corners are the same point is a triangle
+        e.renderer.quad(x1, y1, z1, x2, y2, z2, x3, y3, z3, x3, y3, z3, mc(color));
+    }
+
+    /** Draws a line right now (world coordinates). Only works during a render event. */
+    public static void lineWorld(double x1, double y1, double z1, double x2, double y2, double z2, Color color) {
+        Render3DEvent e = current;
+        if (e == null) return;
+        e.renderer.line(x1, y1, z1, x2, y2, z2, mc(color));
+    }
+
     public static final class WorldBatch {
         private final List<Op> ops = new ArrayList<>();
 

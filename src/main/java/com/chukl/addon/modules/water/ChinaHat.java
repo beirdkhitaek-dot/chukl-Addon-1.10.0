@@ -1,54 +1,20 @@
 package com.chukl.addon.modules.water;
 
-import com.mojang.blaze3d.pipeline.BlendFunction;
-import com.mojang.blaze3d.pipeline.RenderPipeline;
-import com.mojang.blaze3d.pipeline.RenderPipeline.Snippet;
-import com.mojang.blaze3d.platform.DepthTestFunction;
-import com.mojang.blaze3d.vertex.VertexFormat.DrawMode;
 import com.chukl.addon.water.Category;
-import com.chukl.addon.water.WModule;
 import com.chukl.addon.water.ModeSetting;
-import com.chukl.addon.water.Setting;
 import com.chukl.addon.water.RenderUtils;
-import java.awt.Color;
-import net.minecraft.client.gl.RenderPipelines;
+import com.chukl.addon.water.Setting;
+import com.chukl.addon.water.WModule;
 import net.minecraft.client.option.Perspective;
-import net.minecraft.client.render.RenderLayer;
-import net.minecraft.client.render.RenderSetup;
-import net.minecraft.client.render.VertexConsumer;
-import net.minecraft.client.render.VertexConsumerProvider;
-import net.minecraft.client.render.VertexFormats;
-import net.minecraft.client.render.VertexConsumerProvider.Immediate;
-import net.minecraft.client.util.BufferAllocator;
 import net.minecraft.client.util.math.MatrixStack;
-import net.minecraft.util.Identifier;
-import net.minecraft.util.math.RotationAxis;
-import net.minecraft.util.math.Vec3d;
-import org.joml.Matrix4f;
+import org.joml.Vector3f;
 
+import java.awt.Color;
+
+/** Water's China Hat / Nimbus above your head, drawn through Meteor's renderer. */
 public final class ChinaHat extends WModule {
-   private static final int BUFFER_SIZE = 65536;
    private static final int SEGMENTS = 48;
-   private static final RenderPipeline FILL_PIPELINE = RenderPipelines.register(
-      RenderPipeline.builder(new Snippet[]{RenderPipelines.POSITION_COLOR_SNIPPET})
-         .withLocation(Identifier.of("waterclient", "china_hat_fill"))
-         .withVertexFormat(VertexFormats.POSITION_COLOR, DrawMode.TRIANGLES)
-         .withCull(false)
-         .withDepthTestFunction(DepthTestFunction.LEQUAL_DEPTH_TEST)
-         .withDepthWrite(true)
-         .withBlend(BlendFunction.TRANSLUCENT)
-         .build()
-   );
-   private static final RenderPipeline LINE_PIPELINE = RenderPipelines.register(
-      RenderPipeline.builder(new Snippet[]{RenderPipelines.POSITION_COLOR_SNIPPET})
-         .withLocation(Identifier.of("waterclient", "china_hat_line"))
-         .withVertexFormat(VertexFormats.POSITION_COLOR, DrawMode.DEBUG_LINES)
-         .withCull(false)
-         .withDepthTestFunction(DepthTestFunction.LEQUAL_DEPTH_TEST)
-         .withDepthWrite(false)
-         .withBlend(BlendFunction.LIGHTNING)
-         .build()
-   );
+   private static final int NIMBUS_SEGMENTS = 120;
    private final ModeSetting mode = new ModeSetting("Mode", "China Hat", "China Hat", "Nimbus");
    private final Setting<Boolean> headAnchor = new Setting<>("Head Anchor", true);
    private final Setting<Color> color = new Setting<>("Color", new Color(32, 116, 255, 255));
@@ -64,117 +30,110 @@ public final class ChinaHat extends WModule {
 
    @Override
    public void onRender(MatrixStack matrices, float tickDelta) {
-      if (mc.world != null && mc.player != null) {
-         if (mc.options.getPerspective() != Perspective.FIRST_PERSON) {
-            Vec3d cameraPos = RenderUtils.getCameraPos(RenderUtils.getCamera());
-            double x = mc.player.lastRenderX + (mc.player.getX() - mc.player.lastRenderX) * tickDelta;
-            double y = mc.player.lastRenderY + (mc.player.getY() - mc.player.lastRenderY) * tickDelta;
-            double z = mc.player.lastRenderZ + (mc.player.getZ() - mc.player.lastRenderZ) * tickDelta;
-            double hatY = y + mc.player.getHeight() - (mc.player.isSneaking() ? 0.25 : 0.05);
-            matrices.push();
-            matrices.translate(x - cameraPos.x, hatY - cameraPos.y, z - cameraPos.z);
-            if (this.headAnchor.getValue()) {
-               float pitch = mc.player.getPitch(tickDelta);
-               matrices.multiply(RotationAxis.POSITIVE_Y.rotationDegrees(-mc.player.getYaw(tickDelta)));
-               matrices.multiply(RotationAxis.POSITIVE_X.rotationDegrees(pitch));
-               matrices.translate(0.0, Math.abs(pitch) / 90.0 * 0.3, 0.05);
-            }
+      if (mc.world == null || mc.player == null) return;
+      if (mc.options.getPerspective() == Perspective.FIRST_PERSON) return;
 
-            BufferAllocator allocator = new BufferAllocator(65536);
+      double x = mc.player.lastRenderX + (mc.player.getX() - mc.player.lastRenderX) * tickDelta;
+      double y = mc.player.lastRenderY + (mc.player.getY() - mc.player.lastRenderY) * tickDelta;
+      double z = mc.player.lastRenderZ + (mc.player.getZ() - mc.player.lastRenderZ) * tickDelta;
+      double hatY = y + mc.player.getHeight() - (mc.player.isSneaking() ? 0.25 : 0.05);
 
-            try {
-               Immediate immediate = VertexConsumerProvider.immediate(allocator);
-               Matrix4f matrix = matrices.peek().getPositionMatrix();
-               if (this.mode.check("Nimbus")) {
-                  this.renderNimbus(immediate, matrix);
-               } else {
-                  this.renderChinaHat(immediate, matrix);
-               }
+      boolean anchor = this.headAnchor.getValue();
+      float pitch = mc.player.getPitch(tickDelta);
+      float yaw = mc.player.getYaw(tickDelta);
+      float pitchRad = (float) Math.toRadians(pitch);
+      float yawRad = (float) Math.toRadians(-yaw);
+      float offsetY = anchor ? (float) (Math.abs(pitch) / 90.0 * 0.3) : 0.0F;
+      float offsetZ = anchor ? 0.05F : 0.0F;
 
-               immediate.draw();
-            } catch (Throwable var16) {
-               try {
-                  allocator.close();
-               } catch (Throwable var15) {
-                  var16.addSuppressed(var15);
-               }
-
-               throw var16;
-            }
-
-            allocator.close();
-            matrices.pop();
-         }
+      Transform t = new Transform(x, hatY, z, anchor, pitchRad, yawRad, offsetY, offsetZ);
+      if (this.mode.check("Nimbus")) {
+         this.renderNimbus(t);
+      } else {
+         this.renderChinaHat(t);
       }
    }
 
-   private void renderChinaHat(Immediate immediate, Matrix4f matrix) {
+   /** Turns hat-space points (like Water's matrix stack did) into world points. */
+   private record Transform(double x, double y, double z, boolean anchor, float pitchRad, float yawRad, float offsetY, float offsetZ) {
+      Vector3f apply(float lx, float ly, float lz) {
+         Vector3f v = new Vector3f(lx, ly + offsetY, lz + offsetZ);
+         if (anchor) {
+            v.rotateX(pitchRad);
+            v.rotateY(yawRad);
+         }
+         return v;
+      }
+
+      double wx(Vector3f v) {
+         return x + v.x;
+      }
+
+      double wy(Vector3f v) {
+         return y + v.y;
+      }
+
+      double wz(Vector3f v) {
+         return z + v.z;
+      }
+   }
+
+   private void tri(Transform t, float[] a, float[] b, float[] c, Color col) {
+      Vector3f p1 = t.apply(a[0], a[1], a[2]);
+      Vector3f p2 = t.apply(b[0], b[1], b[2]);
+      Vector3f p3 = t.apply(c[0], c[1], c[2]);
+      RenderUtils.triangleWorld(t.wx(p1), t.wy(p1), t.wz(p1), t.wx(p2), t.wy(p2), t.wz(p2), t.wx(p3), t.wy(p3), t.wz(p3), col);
+   }
+
+   private void seg(Transform t, float[] a, float[] b, Color col) {
+      Vector3f p1 = t.apply(a[0], a[1], a[2]);
+      Vector3f p2 = t.apply(b[0], b[1], b[2]);
+      RenderUtils.lineWorld(t.wx(p1), t.wy(p1), t.wz(p1), t.wx(p2), t.wy(p2), t.wz(p2), col);
+   }
+
+   private void renderChinaHat(Transform t) {
       float r = this.radius.getValue().floatValue();
       Color selected = this.color.getValue();
-      VertexConsumer fill = immediate.getBuffer(fillLayer());
+      float rimY = 0.035F;
 
-      for (int i = 0; i < 48; i++) {
-         float a1 = (float)((Math.PI * 2) * i / 48.0);
-         float a2 = (float)((Math.PI * 2) * (i + 1) / 48.0);
-         int c1 = shade(selected, a1, 1.0F);
-         int c2 = shade(selected, a2, 1.0F);
-         fill.vertex(matrix, 0.0F, 0.38F, 0.0F).color(c1);
-         fill.vertex(matrix, (float)Math.cos(a1) * r, 0.035F, (float)Math.sin(a1) * r).color(c1);
-         fill.vertex(matrix, (float)Math.cos(a2) * r, 0.035F, (float)Math.sin(a2) * r).color(c2);
-         int underside = shade(selected, a1, 0.62F);
-         fill.vertex(matrix, 0.0F, 0.035F - 0.012F, 0.0F).color(underside);
-         fill.vertex(matrix, (float)Math.cos(a2) * r, 0.035F - 0.012F, (float)Math.sin(a2) * r).color(underside);
-         fill.vertex(matrix, (float)Math.cos(a1) * r, 0.035F - 0.012F, (float)Math.sin(a1) * r).color(underside);
-      }
+      for (int i = 0; i < SEGMENTS; i++) {
+         float a1 = (float) (Math.PI * 2 * i / SEGMENTS);
+         float a2 = (float) (Math.PI * 2 * (i + 1) / SEGMENTS);
+         float[] apex = {0.0F, 0.38F, 0.0F};
+         float[] r1 = {(float) Math.cos(a1) * r, rimY, (float) Math.sin(a1) * r};
+         float[] r2 = {(float) Math.cos(a2) * r, rimY, (float) Math.sin(a2) * r};
+         tri(t, apex, r1, r2, shade(selected, a1, 1.0F));
 
-      VertexConsumer line = immediate.getBuffer(lineLayer());
-      int lineColor = argb(new Color(selected.getRed(), selected.getGreen(), selected.getBlue(), 255));
+         float[] center = {0.0F, rimY - 0.012F, 0.0F};
+         float[] u1 = {r1[0], rimY - 0.012F, r1[2]};
+         float[] u2 = {r2[0], rimY - 0.012F, r2[2]};
+         tri(t, center, u2, u1, shade(selected, a1, 0.62F));
 
-      for (int i = 0; i < 48; i++) {
-         float a1 = (float)((Math.PI * 2) * i / 48.0);
-         float a2 = (float)((Math.PI * 2) * (i + 1) / 48.0);
-         line.vertex(matrix, (float)Math.cos(a1) * r, 0.035F, (float)Math.sin(a1) * r).color(lineColor);
-         line.vertex(matrix, (float)Math.cos(a2) * r, 0.035F, (float)Math.sin(a2) * r).color(lineColor);
+         seg(t, r1, r2, new Color(selected.getRed(), selected.getGreen(), selected.getBlue(), 255));
       }
    }
 
-   private void renderNimbus(Immediate immediate, Matrix4f matrix) {
-      VertexConsumer line = immediate.getBuffer(lineLayer());
+   private void renderNimbus(Transform t) {
       Color selected = this.color.getValue();
-      int lineColor = argb(new Color(selected.getRed(), selected.getGreen(), selected.getBlue(), 255));
+      Color line = new Color(selected.getRed(), selected.getGreen(), selected.getBlue(), 255);
       float r = Math.min(0.55F, this.radius.getValue().floatValue());
 
-      for (int i = 0; i < 120; i++) {
-         float a1 = (float)((Math.PI * 2) * i / 120.0);
-         float a2 = (float)((Math.PI * 2) * (i + 1) / 120.0);
-         line.vertex(matrix, (float)Math.cos(a1) * r, 0.1F, (float)Math.sin(a1) * r).color(lineColor);
-         line.vertex(matrix, (float)Math.cos(a2) * r, 0.1F, (float)Math.sin(a2) * r).color(lineColor);
+      for (int i = 0; i < NIMBUS_SEGMENTS; i++) {
+         float a1 = (float) (Math.PI * 2 * i / NIMBUS_SEGMENTS);
+         float a2 = (float) (Math.PI * 2 * (i + 1) / NIMBUS_SEGMENTS);
+         seg(t, new float[]{(float) Math.cos(a1) * r, 0.1F, (float) Math.sin(a1) * r},
+            new float[]{(float) Math.cos(a2) * r, 0.1F, (float) Math.sin(a2) * r}, line);
       }
    }
 
-   private static int shade(Color base, float angle, float brightness) {
-      float highlight = 0.72F + Math.max(0.0F, (float)Math.cos(angle - 0.65F)) * 0.28F;
+   private static Color shade(Color base, float angle, float brightness) {
+      float highlight = 0.72F + Math.max(0.0F, (float) Math.cos(angle - 0.65F)) * 0.28F;
       float factor = highlight * brightness;
-      return argb(
-         new Color(
-            Math.min(255, Math.round(base.getRed() * factor)),
-            Math.min(255, Math.round(base.getGreen() * factor)),
-            Math.min(255, Math.round(base.getBlue() * factor)),
-            255
-         )
+      return new Color(
+         Math.min(255, Math.round(base.getRed() * factor)),
+         Math.min(255, Math.round(base.getGreen() * factor)),
+         Math.min(255, Math.round(base.getBlue() * factor)),
+         255
       );
    }
-
-   private static int argb(Color c) {
-      return c.getAlpha() << 24 | c.getRed() << 16 | c.getGreen() << 8 | c.getBlue();
-   }
-
-   private static RenderLayer fillLayer() {
-      return RenderLayer.of("water_china_hat_fill", RenderSetup.builder(FILL_PIPELINE).expectedBufferSize(65536).translucent().build());
-   }
-
-   private static RenderLayer lineLayer() {
-      return RenderLayer.of("water_china_hat_line", RenderSetup.builder(LINE_PIPELINE).expectedBufferSize(65536).translucent().build());
-   }
 }
-
