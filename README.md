@@ -12,6 +12,9 @@ A Meteor Client addon for Minecraft 1.21.11 (Fabric).
 - **Vulxts Freecam** (`vulxts-freecam`) - Vulxts' Freecam: detached camera, your body keeps walking, scroll wheel changes speed.
 - **Vulxts FreeLook** (`vulxts-freelook`) - Vulxts' FreeLook: rotate the camera or the player independently in third person, optional see-through-walls.
 
+### Chukl Render category (from Water Client)
+Future Debug, Chunk Finder, Amethyst ESP, Bedrock Void ESP, Block ESP, China Hat, Extra ESP, Full Bright, Hole ESP, Jump Circles, Light Debug, Mob ESP, Pearl ESP, Player ESP, Scan Overlay, Spawner Notifier, Storage ESP, TNT Explosion Marker, Water Block Notifier. Module ids are prefixed `water-`.
+
 ## Building
 Push to GitHub. The **Build** workflow produces the jar as an artifact (Actions -> latest run -> Artifacts).
 Locally: install Gradle 9.2+ and JDK 21, then run `gradle build`. The jar is in `build/libs/`.
