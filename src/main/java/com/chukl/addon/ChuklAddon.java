@@ -3,6 +3,7 @@ package com.chukl.addon;
 import com.chukl.addon.modules.DeepBlockEntityEsp;
 import com.chukl.addon.modules.DugOutHighlighter;
 import com.chukl.addon.modules.LightFinder;
+import com.chukl.addon.modules.KrispyChunkFinder;
 import com.chukl.addon.modules.SusChunkFinder;
 import com.chukl.addon.modules.VulxtsFreeLook;
 import com.chukl.addon.modules.VulxtsFreecam;
@@ -50,6 +51,7 @@ public class ChuklAddon extends MeteorAddon {
         Modules.get().add(new VulxtsSusChunk());
         Modules.get().add(new VulxtsFreecam());
         Modules.get().add(new VulxtsFreeLook());
+        Modules.get().add(new KrispyChunkFinder());
 
         // Water Client render modules (Chukl Render category)
         Modules.get().add(new AmethystESP());

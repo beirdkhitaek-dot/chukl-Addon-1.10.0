@@ -11,6 +11,7 @@ A Meteor Client addon for Minecraft 1.21.11 (Fabric).
 - **Vulxts Sus Chunk** (`vulxts-suschunk`) - Vulxts' Sus Chunk Finder: weighted amethyst/kelp/bamboo/berries/vines/dripstone scoring with smart zone merging.
 - **Vulxts Freecam** (`vulxts-freecam`) - Vulxts' Freecam: detached camera, your body keeps walking, scroll wheel changes speed.
 - **Vulxts FreeLook** (`vulxts-freelook`) - Vulxts' FreeLook: rotate the camera or the player independently in third person, optional see-through-walls.
+- **Krispy Chunk Finder** (`krispy-chunk-finder`) - flags chunks whose underground light data is all-zero or all-15 and draws a plate on the surface, with an optional toast, ping and kick-on-flag. Only checks chunks that load after you switch it on.
 
 ### Chukl Render category (from Water Client)
 Future Debug, Chunk Finder, Amethyst ESP, Bedrock Void ESP, Block ESP, China Hat, Extra ESP, Full Bright, Hole ESP, Jump Circles, Light Debug, Mob ESP, Pearl ESP, Player ESP, Scan Overlay, Spawner Notifier, Storage ESP, TNT Explosion Marker, Water Block Notifier. Module ids are prefixed `water-`.
